@@ -51,7 +51,7 @@ config X86_BOARD
     select APIC
     select I8259
     select I8254
-    select ISA_DEBUG
+    select SERIAL_ISA
 '''
     open(path('hw/i386/Kconfig'), 'w').write(kc)
     print('added     hw/i386/Kconfig: config X86_BOARD')

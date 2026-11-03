@@ -1,7 +1,8 @@
 /*
  * x86_board: minimal x86 machine model (QEMU examples)
  *
- * CPU + RAM + ROM + interrupt controller (i8259 PIC) + timer (i8254 PIT)
+ * CPU + RAM + BIOS flash + interrupt controller (i8259 PIC)
+ * + timer (i8254 PIT) + serial port (16550 UART)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -23,11 +24,21 @@
 #include "system/tcg.h"
 #include "target/i386/cpu.h"
 
-/* Memory map (Objective 1: x86 reset vector + PC platform layout) */
-#define X86_ROM_SIZE        (64 * KiB)
-#define X86_ROM_BASE        (4 * GiB - X86_ROM_SIZE)   /* 0xFFFF0000 */
-#define X86_ROM_LOW_BASE    (1 * MiB - X86_ROM_SIZE)   /* 0x000F0000 */
-#define X86_DEBUGCON_PORT   0xE9
+/*
+ * Memory map (chipset datasheet, memory decode ranges table)
+ *   FFFC0000h-FFFFFFFFh  BIOS range, always decoded: holds the reset vector
+ *   000E0000h-000FFFFFh  legacy BIOS ranges: the same flash below 1 MiB
+ */
+#define X86_BIOS_SIZE       (256 * KiB)
+#define X86_BIOS_BASE       (4 * GiB - X86_BIOS_SIZE)     /* 0xFFFC0000 */
+#define X86_LEGACY_SIZE     (128 * KiB)
+#define X86_LEGACY_BASE     (1 * MiB - X86_LEGACY_SIZE)   /* 0x000E0000 */
+
+/* I/O ports (chipset datasheet, fixed and variable I/O ranges tables) */
+#define X86_PIT_PORT        0x40    /* 8254 timer, 40h-43h */
+#define X86_PIT_IRQ         0       /* 8254 counter 0 -> IRQ0 */
+#define X86_COM1_PORT       0x3F8   /* serial port 1 (COM1), 3F8h-3FFh */
+#define X86_COM1_IRQ        4       /* COM1 interrupt line (PC convention) */
 
 #define TYPE_X86_BOARD_MACHINE MACHINE_TYPE_NAME("x86_board")
 
@@ -65,27 +76,29 @@ static void x86_board_init(MachineState *ms)
 
     /* STEP 3: RAM and ROM */
     MemoryRegion *sysmem = get_system_memory();
-    MemoryRegion *rom = g_new(MemoryRegion, 1);
-    MemoryRegion *rom_low = g_new(MemoryRegion, 1);
+    MemoryRegion *bios = g_new(MemoryRegion, 1);
+    MemoryRegion *bios_legacy = g_new(MemoryRegion, 1);
 
     /* RAM at 0x0, size comes from -m (default 16 MiB) */
     memory_region_add_subregion(sysmem, 0, ms->ram);
 
-    /* 64 KiB ROM at the top of 4 GiB: holds the reset vector 0xFFFFFFF0 */
-    memory_region_init_rom(rom, NULL, "x86_board.rom", X86_ROM_SIZE,
+    /* 256 KiB BIOS flash at the top of 4 GiB: holds reset vector FFFFFFF0h */
+    memory_region_init_rom(bios, NULL, "x86_board.bios", X86_BIOS_SIZE,
                            &error_fatal);
-    memory_region_add_subregion(sysmem, X86_ROM_BASE, rom);
+    memory_region_add_subregion(sysmem, X86_BIOS_BASE, bios);
 
-    /* Same ROM again at 0xF0000 (real mode F000:xxxx). Priority 1 beats RAM */
-    memory_region_init_alias(rom_low, NULL, "x86_board.rom.low", rom, 0,
-                             X86_ROM_SIZE);
-    memory_region_add_subregion_overlap(sysmem, X86_ROM_LOW_BASE, rom_low, 1);
+    /* Top 128 KiB of the flash again at 0xE0000-0xFFFFF (E and F segments).
+     * Priority 1 beats the RAM underneath */
+    memory_region_init_alias(bios_legacy, NULL, "x86_board.bios.legacy", bios,
+                             X86_BIOS_SIZE - X86_LEGACY_SIZE, X86_LEGACY_SIZE);
+    memory_region_add_subregion_overlap(sysmem, X86_LEGACY_BASE,
+                                        bios_legacy, 1);
 
-    /* Load the -bios file into the ROM */
+    /* Load the -bios file (a 256 KiB flash image) into the flash */
     if (!ms->firmware ||
-        load_image_targphys(ms->firmware, X86_ROM_BASE, X86_ROM_SIZE, NULL) !=
-        X86_ROM_SIZE) {
-        error_report("x86_board: pass -bios <64 KiB image>");
+        load_image_targphys(ms->firmware, X86_BIOS_BASE, X86_BIOS_SIZE, NULL) !=
+        X86_BIOS_SIZE) {
+        error_report("x86_board: pass -bios <256 KiB image>");
         exit(1);
     }
 
@@ -93,21 +106,22 @@ static void x86_board_init(MachineState *ms)
     /* ISA bus: memory space + the separate x86 port I/O space */
     ISABus *isa_bus = isa_bus_new(NULL, sysmem, get_system_io(), &error_fatal);
 
-    /* i8259 pair (master + slave). PIC output -> CPU interrupt pin */
+    /* i8259 pair, master 20h-21h + slave A0h-A1h. Output -> CPU INTR pin */
     qemu_irq *pic = i8259_init(isa_bus, x86_allocate_cpu_irq());
 
     /* ISA IRQ n -> PIC input n */
     isa_bus_register_input_irqs(isa_bus, pic);
 
-    /* Debug console at port 0xE9 so the test ROM can print */
-    ISADevice *dbg = isa_new("isa-debugcon");
-    qdev_prop_set_uint32(DEVICE(dbg), "iobase", X86_DEBUGCON_PORT);
-    qdev_prop_set_chr(DEVICE(dbg), "chardev", serial_hd(0));
-    isa_realize_and_unref(dbg, isa_bus, &error_fatal);
+    /* COM1: 16550 UART at 3F8h on IRQ4, the console the test ROM prints to */
+    ISADevice *com1 = isa_new("isa-serial");
+    qdev_prop_set_uint32(DEVICE(com1), "iobase", X86_COM1_PORT);
+    qdev_prop_set_uint32(DEVICE(com1), "irq", X86_COM1_IRQ);
+    qdev_prop_set_chr(DEVICE(com1), "chardev", serial_hd(0));
+    isa_realize_and_unref(com1, isa_bus, &error_fatal);
 
     /* STEP 5: timer and IRQ wiring */
-    /* i8254 PIT at ports 0x40-0x43, output wired to ISA IRQ0 (PIC input 0) */
-    i8254_pit_init(isa_bus, 0x40, 0, NULL);
+    /* i8254 PIT at 40h-43h, counter 0 output wired to ISA IRQ0 (PIC input 0) */
+    i8254_pit_init(isa_bus, X86_PIT_PORT, X86_PIT_IRQ, NULL);
 }
 
 static void x86_board_class_init(ObjectClass *oc, const void *data)

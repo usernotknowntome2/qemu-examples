@@ -70,7 +70,7 @@ if obj and 'const InterfaceInfo *interfaces' not in obj:
 loader = find_header('hw/core/loader.h')
 m = re.search(r'load_image_targphys\(([^;]*)\);', loader, re.S)
 if m and 'Error' not in m.group(1):
-    text = text.replace('X86_ROM_SIZE, NULL)', 'X86_ROM_SIZE)')
+    text = text.replace('X86_BIOS_SIZE, NULL)', 'X86_BIOS_SIZE)')
 
 # 5. ISA IRQ registration was renamed in QEMU 8.1
 isa = find_header('hw/isa/isa.h')

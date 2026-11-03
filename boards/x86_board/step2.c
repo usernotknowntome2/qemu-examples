@@ -1,7 +1,8 @@
 /*
  * x86_board: minimal x86 machine model (QEMU examples)
  *
- * CPU + RAM + ROM + interrupt controller (i8259 PIC) + timer (i8254 PIT)
+ * CPU + RAM + BIOS flash + interrupt controller (i8259 PIC)
+ * + timer (i8254 PIT) + serial port (16550 UART)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -23,11 +24,21 @@
 #include "system/tcg.h"
 #include "target/i386/cpu.h"
 
-/* Memory map (Objective 1: x86 reset vector + PC platform layout) */
-#define X86_ROM_SIZE        (64 * KiB)
-#define X86_ROM_BASE        (4 * GiB - X86_ROM_SIZE)   /* 0xFFFF0000 */
-#define X86_ROM_LOW_BASE    (1 * MiB - X86_ROM_SIZE)   /* 0x000F0000 */
-#define X86_DEBUGCON_PORT   0xE9
+/*
+ * Memory map (chipset datasheet, memory decode ranges table)
+ *   FFFC0000h-FFFFFFFFh  BIOS range, always decoded: holds the reset vector
+ *   000E0000h-000FFFFFh  legacy BIOS ranges: the same flash below 1 MiB
+ */
+#define X86_BIOS_SIZE       (256 * KiB)
+#define X86_BIOS_BASE       (4 * GiB - X86_BIOS_SIZE)     /* 0xFFFC0000 */
+#define X86_LEGACY_SIZE     (128 * KiB)
+#define X86_LEGACY_BASE     (1 * MiB - X86_LEGACY_SIZE)   /* 0x000E0000 */
+
+/* I/O ports (chipset datasheet, fixed and variable I/O ranges tables) */
+#define X86_PIT_PORT        0x40    /* 8254 timer, 40h-43h */
+#define X86_PIT_IRQ         0       /* 8254 counter 0 -> IRQ0 */
+#define X86_COM1_PORT       0x3F8   /* serial port 1 (COM1), 3F8h-3FFh */
+#define X86_COM1_IRQ        4       /* COM1 interrupt line (PC convention) */
 
 #define TYPE_X86_BOARD_MACHINE MACHINE_TYPE_NAME("x86_board")
 

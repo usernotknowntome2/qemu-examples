@@ -1,19 +1,28 @@
-; test_rom.asm : 64 KiB test ROM for the x86_board machine
+; test_rom.asm : 256 KiB BIOS flash image for the x86_board machine
 ;
-; Mapped by the board at 0xFFFF0000 (top of 4 GiB) and aliased at 0xF0000.
-; Proves, in order: reset vector -> ROM alias -> RAM -> PIC -> PIT -> IRQ0.
+; The board maps it at 0xFFFC0000-0xFFFFFFFF (top of 4 GiB) and maps its
+; top 128 KiB again at 0xE0000-0xFFFFF. The code lives in the top 64 KiB,
+; which is segment F000 below 1 MiB.
+; Proves, in order: reset vector -> legacy alias -> RAM -> COM1 -> PIC -> PIT -> IRQ0.
 ;
-; Build: nasm -f bin test_rom.asm -o test_rom.bin   (must be exactly 65536 bytes)
+; Build: nasm -f bin test_rom.asm -o test_rom.bin   (must be exactly 262144 bytes)
 ; Run:   qemu-system-x86_64 -M x86_board -accel tcg -bios test_rom.bin -nographic
 
 bits 16
-org 0x0000                  ; offsets inside segment F000
 
-DEBUGCON    equ 0xE9        ; isa-debugcon port
+COM1        equ 0x3F8       ; serial port 1: data register (THR)
+COM1_LSR    equ COM1 + 5    ; line status register, bit 5 = THR empty
 TICKS       equ 0x0500      ; tick counter in RAM (segment 0)
 NTICKS      equ 20          ; ticks to wait before declaring success
 PIT_HZ      equ 1193182
 PIT_DIV     equ PIT_HZ / 100    ; ~100 Hz
+
+; ---- bottom 192 KiB of the flash: unused (erased flash reads 0xFF) ----
+section unused start=0
+    times 0x30000 db 0xFF
+
+; ---- top 64 KiB: segment F000 (0xF0000 below 1 MiB, 0xFFFF0000 below 4 GiB) ----
+section code start=0x30000 vstart=0
 
 start:
     cli
@@ -52,7 +61,7 @@ start:
     mov  al, 0xFE           ; OCW1: unmask IR0 only
     out  0x21, al
 
-    ; --- i8254 channel 0: lobyte/hibyte, mode 2 (rate generator) ---
+    ; --- i8254 counter 0: lobyte/hibyte, mode 2 (rate generator) ---
     mov  al, 0x34
     out  0x43, al
     mov  ax, PIT_DIV
@@ -84,14 +93,29 @@ timer_isr:
     mov  ds, ax
     inc  word [TICKS]
     mov  al, '.'
-    out  DEBUGCON, al
+    call putc
     mov  al, 0x20           ; non-specific EOI, or we get exactly one tick
     out  0x20, al
     pop  ds
     pop  ax
     iret
 
-; puts: print zero-terminated string at CS:SI to the debug port
+; putc: send AL to COM1 (wait until the transmit register is empty)
+putc:
+    push dx
+    push ax
+    mov  dx, COM1_LSR
+.wait:
+    in   al, dx
+    test al, 0x20
+    jz   .wait
+    pop  ax
+    mov  dx, COM1
+    out  dx, al
+    pop  dx
+    ret
+
+; puts: print zero-terminated string at CS:SI to COM1
 puts:
     push ax
 .next:
@@ -99,7 +123,7 @@ puts:
     inc  si
     test al, al
     jz   .out
-    out  DEBUGCON, al
+    call putc
     jmp  .next
 .out:
     pop  ax
@@ -112,5 +136,5 @@ msg_done db 13, 10, "[x86_board] 20 timer interrupts received. PASS", 13, 10, 0
 ; ---- reset vector: CPU starts at 0xFFFFFFF0 (CS base 0xFFFF0000, IP FFF0) ----
     times 0xFFF0 - ($ - $$) db 0xFF
 reset:
-    jmp  0xF000:start       ; far jump: CS base becomes 0xF0000 (low alias)
+    jmp  0xF000:start       ; far jump: CS base becomes 0xF0000 (legacy alias)
     times 0x10000 - ($ - $$) db 0xFF
