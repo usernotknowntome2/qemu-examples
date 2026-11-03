@@ -1,0 +1,5 @@
+# created when the scripts run
+.qemu-paths
+build.log
+int.log
+__pycache__/
